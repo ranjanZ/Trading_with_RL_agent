@@ -1,0 +1,63 @@
+# Trading Configuration
+trading:
+  initial_balance: 10000.0
+  spread_pips: 0.2
+  commission: 0.0
+  pip_value: 0.01
+  max_position_size: 1.0
+  max_daily_loss: 500.0
+  max_drawdown: 0.2
+  
+# Data Configuration
+data:
+  fille_dir_path: "data/processed/"   ##to be modifed
+  lookback_window: 20
+  update_frequency: 1  # seconds
+  batch_size: 64
+  buffer_size: 10000
+  feature_columns:
+    - close
+
+
+    
+# RL Configuration
+rl:
+  framework: torch
+  num_workers: 4
+  num_gpus: 1
+  num_cpus_per_worker: 1
+  model:
+    fcnet_hiddens: [256, 128, 64]
+    fcnet_activation: relu
+    use_lstm: false
+    lstm_cell_size: 256
+    
+  training:
+    lr: 0.0003
+    gamma: 0.99
+    tau: 0.005
+    target_network_update_freq: 100
+    buffer_size: 1000000
+    learning_starts: 1000
+    batch_size: 256
+    
+# Imitation Learning Configuration
+imitation:
+  epochs: 50
+  batch_size: 64
+  validation_split: 0.2
+  class_weights: true
+  
+# Deployment Configuration
+deployment:
+  mode: paper  # paper, live
+  broker: alpaca  # alpaca, interactive_brokers, oanda
+  api_key: ${API_KEY}
+  api_secret: ${API_SECRET}
+  websocket_url: wss://stream.data.alpaca.markets/v2/iex
+  
+# Logging
+logging:
+  level: INFO
+  wandb_project: trading_rl
+  mlflow_tracking_uri: http://localhost:5000

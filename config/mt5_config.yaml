@@ -1,0 +1,16 @@
+class: Config
+MODE: DEMO_ACCOUNT
+
+HUMAN_INTERVENTION: false
+DEMO_ACCOUNT:
+  number: 11547356
+  password: gji&5&aV
+  server: VantageInternational-Demo
+  lot_multiplier: 1
+REAL_ACCOUNT:
+  number: 22361861
+  password: Mondal#12345
+  server: VantageInternational-Live 11
+  lot_multiplier: 1
+
+

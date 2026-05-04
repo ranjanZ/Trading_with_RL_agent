@@ -1,0 +1,9 @@
+{
+  "symbol": "XAUUSD",
+  "timeframe": "1h",
+  "days_collected": "latest",
+  "start_date": "2025-12-16 14:00:00",
+  "end_date": "2026-05-04 20:00:00",
+  "total_bars": 2208,
+  "collection_date": "2026-05-04 23:13:46"
+}

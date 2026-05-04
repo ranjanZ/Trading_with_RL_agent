@@ -1,0 +1,33 @@
+
+
+python -m venv .venv
+source .venv/bin/activate
+
+
+#Install PyTorch with CPU support only:
+#pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install mt5linux
+
+pip install -r requirements.txt
+
+
+
+#top collect data from MT5, run the following command:
+#changr config/data_config.yaml to set the parameters for data collection, such as the symbols, timeframes, and date range.
+python scripts/collect_mt5_data.py
+
+
+
+##feature engineering and data preprocessing: saved the data to Data processes filder 
+python Data/feature_engineering.py
+
+
+
+
+
+#train the model using the collected data:
+python training/imitation_learning.py
+
+
+#visualize the results:
+python utils/visualization.py

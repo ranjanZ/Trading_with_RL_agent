@@ -1,0 +1,70 @@
+data:
+  # Raw data paths
+  raw_data_path: "Data/raw/historical/"
+  processed_data_path: "Data/processed/"
+  # cache_path: "data/cache/"
+  # streaming_buffer_path: "data/streaming/"
+  
+  # Data sources
+  sources:
+    historical:
+      enabled: true
+      format: "csv"  # csv, parquet, hdf5
+      # compression: "gzip"
+      # date_format: "%Y%m%d"
+      
+    # tick:
+    #   enabled: false
+    #   format: "parquet"
+    #   partition_by: ["year", "month"]
+      
+    # realtime:
+    #   enabled: false
+    #   provider: "alpaca"  # alpaca, interactive_brokers, oanda
+    #   websocket_url: "wss://stream.data.alpaca.markets/v2/iex"
+    #   batch_size: 100
+  
+  # Data specifications
+  symbols:
+    - XAUUSD
+  
+  timeframes:
+    tick: "1s"
+    1m: "1min"
+    5m: "5min"
+    1h: "1hour"
+    1d: "1day"
+  
+  # Date ranges
+  date_ranges:
+    start_date: "2026-02-01"
+    end_date: "2026-05-25"
+
+  # Train, val, and test splits
+  splits:
+    train_start: "2024-01-01"
+    train_end: "2024-12-31"
+    val_start: "2025-01-01"
+    val_end: "2025-02-28"
+    test_start: "2025-03-01"
+    test_end: "2025-04-20"
+  
+
+
+  # Feature engineering
+  features:
+    lookback_window: 20
+    technical_indicators:
+      - sma
+      - ema
+      - atr
+      - macd
+
+    window_sizes: [5, 10, 20, 50]
+    
+  # Processing
+  processing:
+    batch_size: 10000
+    num_workers: 4
+    use_dask: true
+    memory_limit: "16GB"

@@ -1,0 +1,13 @@
+*.pyc
+__pycache__/
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/ 
+# Ignore virtual environment directories
+.venv/
+
+# Ignore log files
+*.log
+# Ignore temporary files
+*.tmp*.csv
+Data/processed/
+Data/streaming/

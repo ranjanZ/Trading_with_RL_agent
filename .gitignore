@@ -9,5 +9,5 @@ __pycache__/
 *.log
 # Ignore temporary files
 *.tmp*.csv
-Data/processed/
+Data/
 Data/streaming/

@@ -11,3 +11,4 @@ __pycache__/
 # Ignore temporary files
 *.tmp*.csv
 Data/streaming/
+Data/processed/XAUUSD_1m_features.csv

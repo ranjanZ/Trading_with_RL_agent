@@ -24,6 +24,11 @@ class TradingEnvironment(gym.Env):
     """
     Trading Environment that follows the original working logic
     but adapted for gymnasium with historical data.
+    
+    Action values:
+        -1 -> SELL
+         0 -> HOLD
+         1 -> BUY
     """
 
     def __init__(self,):
@@ -107,12 +112,10 @@ class TradingEnvironment(gym.Env):
         self.lookback_window = config.get("lookback_window", 20)
 
         # ----- Observation & action spaces -----
-        self.observation_dim = len(self.feature_columns) * (self.lookback_window + 1) + 5
-        self.action_space = spaces.Discrete(3)          # 0=BUY, 1=SELL, 2=HOLD
-        # State machine:
-        # Position 0 (flat): can BUY, SELL, or HOLD
-        # Position 1 (long): can SELL (to close), HOLD
-        # Position -1 (short): can BUY (to close), HOLD
+        # +6 extra features: 3 for position one-hot, 3 for PnL info
+        self.observation_dim = len(self.feature_columns) * (self.lookback_window + 1) + 6
+        # Action space: -1 = SELL, 0 = HOLD, 1 = BUY
+        self.action_space = spaces.Box(low=-1, high=1, shape=(), dtype=np.int32)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
             shape=(self.observation_dim,),
@@ -140,6 +143,7 @@ class TradingEnvironment(gym.Env):
         return obs, info
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        # action is directly -1, 0, or 1
         current_price = self._get_current_price()
 
         info = {
@@ -151,7 +155,8 @@ class TradingEnvironment(gym.Env):
         reward = 0.0
 
         # ---- Action validation: enforce state machine ----
-        if not self._get_valid_actions_mask()[action]:
+        valid_mask = self._get_valid_actions_mask()   # dict: { -1: bool, 0: bool, 1: bool }
+        if not valid_mask.get(action, False):
             info['new_position'] = self.current_position
             self._update_unrealized_pnl(current_price)
             reward = -0.1  # penalty for invalid action
@@ -160,34 +165,27 @@ class TradingEnvironment(gym.Env):
             return obs, reward, False, False, info
 
         # ---- Execute action with state machine logic ----
-        # BUY: open long if flat, or close short if in short position
-        if action == 0:  # BUY
+        if action == 1:  # BUY
             if self.current_position == 0:
-                # Open long position
                 self._open_position(1, current_price)
                 info['trade_executed'] = True
             elif self.current_position == -1:
-                # Close short position
                 pnl = self._close_position(current_price)
                 reward = pnl
                 info['realized_pnl'] = pnl
                 info['trade_executed'] = True
         
-        # SELL: open short if flat, or close long if in long position
-        elif action == 1:  # SELL
+        elif action == -1:  # SELL
             if self.current_position == 0:
-                # Open short position
                 self._open_position(-1, current_price)
                 info['trade_executed'] = True
             elif self.current_position == 1:
-                # Close long position
                 pnl = self._close_position(current_price)
                 reward = pnl
                 info['realized_pnl'] = pnl
                 info['trade_executed'] = True
         
-        # HOLD: do nothing
-        elif action == 2:  # HOLD
+        elif action == 0:  # HOLD
             pass
 
         self._update_unrealized_pnl(current_price)
@@ -208,20 +206,23 @@ class TradingEnvironment(gym.Env):
     # ----- Helper methods (modified for state machine) -----
     def _get_valid_actions_mask(self):
         """
-        Enforce order state machine:
-        - Position 0 (flat): can BUY, SELL, or HOLD
-        - Position 1 (long): cannot BUY again, can SELL (close), or HOLD
-        - Position -1 (short): can BUY (close), cannot SELL again, or HOLD
+        Returns a dict mapping each possible action (-1, 0, 1) to a boolean
+        indicating if it is allowed in the current state.
+        Enforces order state machine:
+        - Position 0 (flat): BUY, SELL, HOLD all allowed
+        - Position 1 (long): cannot BUY, can SELL (close), can HOLD
+        - Position -1 (short): can BUY (close), cannot SELL, can HOLD
         """
         if self.current_position == 0:
-            return [True, True, True]  # BUY, SELL, HOLD allowed
+            return { -1: True, 0: True, 1: True }   # all allowed
         elif self.current_position == 1:
-            return [False, True, True]  # cannot BUY, can SELL (close), can HOLD
+            return { -1: True, 0: True, 1: False }  # SELL allowed, BUY forbidden
         else:  # position == -1
-            return [True, False, True]  # can BUY (close), cannot SELL, can HOLD
+            return { -1: False, 0: True, 1: True }  # BUY allowed, SELL forbidden
 
     def _get_action_names(self):
-        return {0: 'BUY', 1: 'SELL', 2: 'HOLD'}
+        """Maps action values to human-readable names."""
+        return { -1: 'SELL', 0: 'HOLD', 1: 'BUY' }
 
     def _open_position(self, direction, price):
         spread_add = self.spread_pips * self.pip_value
@@ -279,8 +280,6 @@ class TradingEnvironment(gym.Env):
             else:
                 features.extend([0] * len(window))
 
-        
-
         # position one‑hot
         pos = self.current_position
         pos_onehot = [1 if pos == 1 else 0, 1 if pos == -1 else 0, 1 if pos == 0 else 0]
@@ -317,123 +316,173 @@ class TradingEnvironment(gym.Env):
     
 
 
-
-
-
 if __name__ == "__main__":
 
     print("Testing TradingEnvironment with random actions and state machine...")
     env = TradingEnvironment()
-    obs, info = env.reset()
 
-    # Collect episode data for visualization
+    # Run for more steps to ensure actual trades occur
+    obs, info = env.reset()
+    total_steps = 0
+
     episode_data = {
         'steps': [],
+        'time': [],          # <-- NEW: store timestamps
         'prices': [],
+        'open': [],
+        'high': [],
+        'low': [],
         'positions': [],
         'actions': [],
         'balance': [],
         'unrealized_pnl': [],
         'realized_pnl': [],
-        'total_pnl': [],
+        'total_pnl': []
     }
 
-    for step_num in range(500):
-        # Sample random action, but using valid actions mask
+    for step_num in range(500):   # run many steps to generate trades
         valid_mask = env._get_valid_actions_mask()
-        valid_actions = [i for i, valid in enumerate(valid_mask) if valid]
+        valid_actions = [a for a, valid in valid_mask.items() if valid]
         action = np.random.choice(valid_actions)
-        
+
         obs, reward, terminated, truncated, info = env.step(action)
-        
-        # Collect data
-        current_price = env._get_current_price()
+
+        # Collect current bar data
+        row = env.data.iloc[env.current_step]
+        current_price = row['close']
         episode_data['steps'].append(step_num)
+        episode_data['time'].append(row['time'])          # <-- store timestamp
         episode_data['prices'].append(current_price)
+        episode_data['open'].append(row['open'])
+        episode_data['high'].append(row['high'])
+        episode_data['low'].append(row['low'])
         episode_data['positions'].append(info['position'])
         episode_data['actions'].append(action)
         episode_data['balance'].append(info['balance'])
         episode_data['unrealized_pnl'].append(info['unrealized_pnl'])
         episode_data['realized_pnl'].append(info['realized_pnl'])
         episode_data['total_pnl'].append(info['total_pnl'])
-        
-        if step_num % 50 == 0:
-            print(f"Step {step_num}: Price={current_price:.4f}, Balance={info['balance']:.2f}, "
-                  f"Position={info['position']}, Total PnL={info['total_pnl']:.2f}")
-        
+
         if terminated:
             print(f"Episode terminated at step {step_num}")
             break
 
-    print(f"\nSimulation completed at step {step_num}!")
-    print(f"Final Balance: {info['balance']:.2f}")
+    print(f"\nFinal Balance: {info['balance']:.2f}")
     print(f"Total PnL: {info['total_pnl']:.2f}")
-    print(f"Realized PnL: {info['realized_pnl']:.2f}")
-    print(f"Unrealized PnL: {info['unrealized_pnl']:.2f}")
-    print(f"Total Trades: {len(info['trade_history'])}")
-    
-    # Create visualization
+    print(f"Trades executed: {len(info['trade_history'])}")
+
+    # --- Visualization with Candlestick Chart ---
     try:
+        import mplfinance as mpf
         import matplotlib.pyplot as plt
-        
-        fig, axes = plt.subplots(4, 1, figsize=(14, 10))
-        
-        # Plot 1: Price and positions
-        ax1 = axes[0]
-        ax1.plot(episode_data['steps'], episode_data['prices'], label='Price', color='black', linewidth=2)
-        
-        # Mark buy and sell points
-        buy_steps = [episode_data['steps'][i] for i in range(len(episode_data['steps'])) 
-                     if episode_data['positions'][i] == 1 and (i == 0 or episode_data['positions'][i-1] == 0)]
-        short_steps = [episode_data['steps'][i] for i in range(len(episode_data['steps'])) 
-                       if episode_data['positions'][i] == -1 and (i == 0 or episode_data['positions'][i-1] == 0)]
-        
-        buy_prices = [episode_data['prices'][episode_data['steps'].index(s)] for s in buy_steps if s in episode_data['steps']]
-        short_prices = [episode_data['prices'][episode_data['steps'].index(s)] for s in short_steps if s in episode_data['steps']]
-        
-        ax1.scatter(buy_steps[:len(buy_prices)], buy_prices, marker='^', color='green', s=100, label='BUY Entry', zorder=5)
-        ax1.scatter(short_steps[:len(short_prices)], short_prices, marker='v', color='red', s=100, label='SELL Entry', zorder=5)
-        
-        ax1.set_ylabel('Price')
-        ax1.set_title('Trading Environment - Price and Positions')
+        import numpy as np
+        import pandas as pd
+
+        # Build OHLC DataFrame with DatetimeIndex (required by mplfinance)
+        ohlc_df = pd.DataFrame({
+            'Open':  episode_data['open'],
+            'High':  episode_data['high'],
+            'Low':   episode_data['low'],
+            'Close': episode_data['prices']
+        }, index=pd.DatetimeIndex(episode_data['time']))   # <-- fixes DatetimeIndex error
+
+        # Detect entry/exit points from position changes
+        pos_series = episode_data['positions']
+        buy_entry_steps = []
+        sell_entry_steps = []
+        buy_exit_steps = []
+        sell_exit_steps = []
+
+        for i in range(1, len(pos_series)):
+            if pos_series[i-1] == 0 and pos_series[i] == 1:
+                buy_entry_steps.append(i)
+            elif pos_series[i-1] == 0 and pos_series[i] == -1:
+                sell_entry_steps.append(i)
+            elif pos_series[i-1] == 1 and pos_series[i] == 0:
+                buy_exit_steps.append(i)
+            elif pos_series[i-1] == -1 and pos_series[i] == 0:
+                sell_exit_steps.append(i)
+
+        # Create marker arrays of same length as DataFrame, filled with NaN
+        num_points = len(ohlc_df)
+        markers = {
+            'buy_entry': np.full(num_points, np.nan),
+            'sell_entry': np.full(num_points, np.nan),
+            'buy_exit': np.full(num_points, np.nan),
+            'sell_exit': np.full(num_points, np.nan)
+        }
+        for step in buy_entry_steps:
+            markers['buy_entry'][step] = episode_data['prices'][step]
+        for step in sell_entry_steps:
+            markers['sell_entry'][step] = episode_data['prices'][step]
+        for step in buy_exit_steps:
+            markers['buy_exit'][step] = episode_data['prices'][step]
+        for step in sell_exit_steps:
+            markers['sell_exit'][step] = episode_data['prices'][step]
+
+        # Build additional plots for markers
+        ap = []
+        if buy_entry_steps:
+            ap.append(mpf.make_addplot(markers['buy_entry'], type='scatter', marker='^', color='lime', markersize=100, panel=0))
+        if sell_entry_steps:
+            ap.append(mpf.make_addplot(markers['sell_entry'], type='scatter', marker='v', color='red', markersize=100, panel=0))
+        if buy_exit_steps:
+            ap.append(mpf.make_addplot(markers['buy_exit'], type='scatter', marker='o', color='blue', markersize=80, panel=0))
+        if sell_exit_steps:
+            ap.append(mpf.make_addplot(markers['sell_exit'], type='scatter', marker='o', color='orange', markersize=80, panel=0))
+
+        # Plot candlestick + markers
+        fig, axes = mpf.plot(ohlc_df,
+                             type='candle',
+                             style='charles',
+                             addplot=ap if ap else None,
+                             volume=False,
+                             returnfig=True,
+                             title='Trading Environment - Candlestick with Trade Markers')
+        plt.savefig('Data/visulizaation/candlestick_trades.png', dpi=150, bbox_inches='tight')
+        plt.show()
+
+        # Separate balance / PnL chart
+        fig2, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+        ax1.plot(episode_data['steps'], episode_data['balance'], label='Balance', color='blue')
+        ax1.axhline(y=env.initial_balance, color='gray', linestyle='--', label='Initial')
+        ax1.set_ylabel('Balance ($)')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Balance
-        ax2 = axes[1]
-        ax2.plot(episode_data['steps'], episode_data['balance'], label='Balance', color='blue', linewidth=2)
-        ax2.axhline(y=env.initial_balance, color='gray', linestyle='--', label='Initial Balance')
-        ax2.set_ylabel('Balance ($)')
-        ax2.set_title('Account Balance Over Time')
+
+        ax2.plot(episode_data['steps'], episode_data['total_pnl'], label='Total PnL', color='green')
+        ax2.plot(episode_data['steps'], episode_data['realized_pnl'], label='Realized PnL', color='orange')
+        ax2.axhline(y=0, color='black', linewidth=0.5)
+        ax2.set_xlabel('Step')
+        ax2.set_ylabel('PnL ($)')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
-        
-        # Plot 3: PnL Components
-        ax3 = axes[2]
-        ax3.plot(episode_data['steps'], episode_data['realized_pnl'], label='Realized PnL', color='green', linewidth=2)
-        ax3.plot(episode_data['steps'], episode_data['total_pnl'], label='Total PnL', color='blue', linewidth=2)
-        ax3.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-        ax3.set_ylabel('PnL ($)')
-        ax3.set_title('Profit and Loss Over Time')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-        
-        # Plot 4: Position
-        ax4 = axes[3]
-        colors = ['red' if p == -1 else 'green' if p == 1 else 'gray' for p in episode_data['positions']]
-        ax4.bar(episode_data['steps'], episode_data['positions'], color=colors, width=1, alpha=0.7)
-        ax4.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-        ax4.set_xlabel('Step')
-        ax4.set_ylabel('Position')
-        ax4.set_yticks([-1, 0, 1])
-        ax4.set_yticklabels(['SHORT', 'FLAT', 'LONG'])
-        ax4.set_title('Position State Over Time (Red=SHORT, Green=LONG, Gray=FLAT)')
-        ax4.grid(True, alpha=0.3, axis='y')
-        
         plt.tight_layout()
-        plt.savefig('Data/visulizaation/trading_env_test_visualization.png', dpi=100, bbox_inches='tight')
-        print("\nVisualization saved to: Data/visulizaation/trading_env_test_visualization.png")
-        plt.close()
-        
+        plt.savefig('Data/visulizaation/balance_pnl.png', dpi=150, bbox_inches='tight')
+        plt.show()
+
     except ImportError:
-        print("Matplotlib not available for visualization")
+        print("mplfinance not installed. Falling back to simple line plot with markers.")
+        import matplotlib.pyplot as plt
+
+        # Fallback line plot with correct marker detection
+        pos = episode_data['positions']
+        steps = episode_data['steps']
+        prices = episode_data['prices']
+
+        buy_entry_steps = [i for i in range(1, len(pos)) if pos[i-1]==0 and pos[i]==1]
+        sell_entry_steps = [i for i in range(1, len(pos)) if pos[i-1]==0 and pos[i]==-1]
+
+        plt.figure(figsize=(14,8))
+        plt.plot(steps, prices, color='black', label='Price')
+        if buy_entry_steps:
+            plt.scatter([steps[i] for i in buy_entry_steps],
+                        [prices[i] for i in buy_entry_steps],
+                        marker='^', color='green', s=100, label='BUY Entry')
+        if sell_entry_steps:
+            plt.scatter([steps[i] for i in sell_entry_steps],
+                        [prices[i] for i in sell_entry_steps],
+                        marker='v', color='red', s=100, label='SELL Entry')
+        plt.legend()
+        plt.savefig('Data/visulizaation/price_trades_fallback.png', dpi=150, bbox_inches='tight')
+        plt.show()

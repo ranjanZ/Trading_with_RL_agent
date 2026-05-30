@@ -6,6 +6,11 @@ class TrendFollowingExpert:
     """
     Expert trading strategy based on moving average crossover,
     RSI, ADX, and trend slope.
+    
+    Action mapping (new):
+        1  → BUY   (open long or close short)
+        -1 → SELL  (open short or close long)
+        0  → HOLD  (do nothing)
     """
     
     def __init__(self, fast_ma=20, slow_ma=50):
@@ -14,27 +19,29 @@ class TrendFollowingExpert:
         self.current_position = 0  # 0: flat, 1: long, -1: short
 
 
-    def get_expert_action(self, df: pd.DataFrame, idx: int, current_position: int = None) -> int:
+    def get_expert_action(self, df: pd.DataFrame, idx: int, current_position: Optional[int] = None) -> int:
         """
-        Return action at index idx using new state machine:
-        0 = BUY (open LONG or close SHORT)
-        1 = SELL (open SHORT or close LONG)
-        2 = HOLD
+        Return action at index idx using the new action space:
+        - 1  = BUY   (open LONG or close SHORT)
+        - -1 = SELL  (open SHORT or close LONG)
+        - 0  = HOLD
         
-        Optimized for 5-min charts with proper trend detection and exit signals.
+        Optimized for 5‑min charts with proper trend detection and exit signals.
         
         Args:
             df: DataFrame with price data
             idx: Current index
             current_position: Current position (0=flat, 1=long, -1=short)
                             If None, uses self.current_position
+        Returns:
+            int: 1, -1 or 0
         """
         if current_position is not None:
             self.current_position = current_position
         
         # Need minimum history for indicators
         if idx < 5:
-            return 2  # HOLD until we have enough data
+            return 0  # HOLD until we have enough data
         
         row = df.iloc[idx]
         
@@ -44,23 +51,23 @@ class TrendFollowingExpert:
         # State machine logic with new action space
         if self.current_position == 0:  # FLAT
             if bullish:
-                action = 0   # BUY (open LONG)
+                action = 1   # BUY (open LONG)
             elif bearish:
-                action = 1   # SELL (open SHORT)
+                action = -1  # SELL (open SHORT)
             else:
-                action = 2   # HOLD
+                action = 0   # HOLD
         elif self.current_position == 1:  # LONG
             # In LONG: hold on bullish, exit on bearish/momentum loss
             if bullish:
-                action = 2   # HOLD (maintain LONG)
+                action = 0   # HOLD (maintain LONG)
             else:
-                action = 1   # SELL (close LONG on trend reversal)
+                action = -1  # SELL (close LONG on trend reversal)
         else:  # SHORT (-1)
             # In SHORT: hold on bearish, exit on bullish/momentum loss
             if bearish:
-                action = 2   # HOLD (maintain SHORT)
+                action = 0   # HOLD (maintain SHORT)
             else:
-                action = 0   # BUY (close SHORT on trend reversal)
+                action = 1   # BUY (close SHORT on trend reversal)
 
         # Update internal position state
         self.current_position = self._next_position(action)
@@ -127,34 +134,32 @@ class TrendFollowingExpert:
         
         return bullish, bearish
 
-
-
-
     def _next_position(self, action: int) -> int:
         """
-        Compute new position after taking action (new state machine).
-        Actions: 0=BUY, 1=SELL, 2=HOLD
+        Compute new position after taking action (new action space).
+        Actions: 1=BUY, -1=SELL, 0=HOLD
+        Returns: 1 (LONG), -1 (SHORT), or 0 (FLAT)
         """
         if self.current_position == 0:  # FLAT
-            if action == 0:  # BUY
-                return 1  # Go LONG
-            elif action == 1:  # SELL
-                return -1  # Go SHORT
-            else:  # HOLD
+            if action == 1:             # BUY
+                return 1
+            elif action == -1:          # SELL
+                return -1
+            else:                       # HOLD
                 return 0
         elif self.current_position == 1:  # LONG
-            if action == 0:  # BUY (invalid - shouldn't happen)
+            if action == 1:               # BUY (invalid, but keep position)
                 return 1
-            elif action == 1:  # SELL (close LONG)
-                return 0  # Return to FLAT
-            else:  # HOLD
+            elif action == -1:            # SELL (close LONG)
+                return 0
+            else:                         # HOLD
                 return 1
         else:  # SHORT (-1)
-            if action == 0:  # BUY (close SHORT)
-                return 0  # Return to FLAT
-            elif action == 1:  # SELL (invalid - shouldn't happen)
+            if action == 1:               # BUY (close SHORT)
+                return 0
+            elif action == -1:            # SELL (invalid, keep position)
                 return -1
-            else:  # HOLD
+            else:                         # HOLD
                 return -1
 
     def reset_position(self):
@@ -207,7 +212,7 @@ class TrendFollowingExpert:
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("TESTING TREND FOLLOWING EXPERT")
+    print("TESTING TREND FOLLOWING EXPERT (new action space)")
     print("=" * 60)
 
     # Generate sample price data
@@ -234,14 +239,14 @@ if __name__ == "__main__":
         actions.append(action)
 
     df['expert_action'] = actions
-    print("\nExpert action distribution:")
+    print("\nExpert action distribution (1=BUY, -1=SELL, 0=HOLD):")
     print(df['expert_action'].value_counts().sort_index().to_dict())
 
     # Print some statistics
     print(f"\nTotal actions: {len(df)}")
-    print(f"BUY (0):   {(df['expert_action']==0).sum()}")
-    print(f"SELL (1):  {(df['expert_action']==1).sum()}")
-    print(f"HOLD (2):  {(df['expert_action']==2).sum()}")
+    print(f"BUY (1):   {(df['expert_action']==1).sum()}")
+    print(f"SELL (-1): {(df['expert_action']==-1).sum()}")
+    print(f"HOLD (0):  {(df['expert_action']==0).sum()}")
 
     # Show first few rows
     print("\nFirst 10 rows of expert signals:")

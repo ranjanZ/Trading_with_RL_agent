@@ -1,6 +1,8 @@
 import numpy as np
 from typing import Dict, List, Optional
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import pandas as   pd
+
 
 def calculate_imitation_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
     """Calculate metrics for imitation learning"""
@@ -25,35 +27,90 @@ def calculate_imitation_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
     
     return metrics
 
-def calculate_trading_metrics(trades: List[Dict]) -> Dict:
-    """Calculate trading performance metrics"""
-    
+
+import numpy as np
+from typing import Dict, List, Optional
+
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    pd = None
+    HAS_PANDAS = False
+
+def calculate_trading_metrics(trades: List[Dict], initial_capital: float = 10000.0,
+                              annualize: bool = True, periods_per_year: int = 252) -> Dict:
+    """
+    Calculate trading metrics, including an annualised Sharpe ratio derived
+    from a daily equity curve.
+
+    - If trades contain 'date' or 'timestamp' keys, daily PnL is aggregated
+      to form a true daily equity curve.
+    - Otherwise, each trade is treated as a "day" (sequential step) to
+      produce an equity curve.
+    """
     if not trades:
         return {}
-    
+
+    # Basic statistics (unchanged)
     pnls = [t['pnl'] for t in trades]
-    winning_trades = [p for p in pnls if p > 0]
-    losing_trades = [p for p in pnls if p < 0]
-    
+    winning = [p for p in pnls if p > 0]
+    losing  = [p for p in pnls if p < 0]
+
     metrics = {
         'total_trades': len(trades),
-        'winning_trades': len(winning_trades),
-        'losing_trades': len(losing_trades),
-        'win_rate': len(winning_trades) / len(trades) if trades else 0,
+        'winning_trades': len(winning),
+        'losing_trades': len(losing),
+        'win_rate': len(winning) / len(trades) if trades else 0,
         'total_pnl': sum(pnls),
-        'avg_win': np.mean(winning_trades) if winning_trades else 0,
-        'avg_loss': np.mean(losing_trades) if losing_trades else 0,
+        'avg_win': np.mean(winning) if winning else 0,
+        'avg_loss': np.mean(losing) if losing else 0,
         'max_win': max(pnls) if pnls else 0,
         'max_loss': min(pnls) if pnls else 0,
-        'profit_factor': abs(sum(winning_trades) / sum(losing_trades)) if losing_trades else float('inf'),
+        'profit_factor': (abs(sum(winning) / sum(losing))
+                          if losing else float('inf')),
     }
-    
-    # Sharpe ratio (assuming risk-free rate = 0)
-    if len(pnls) > 1:
-        metrics['sharpe_ratio'] = np.mean(pnls) / (np.std(pnls) + 1e-8)
-    
-    return metrics
 
+    # ----- Build equity curve -----
+    # Try to use timestamps if available and pandas is installed
+    equity = None
+    if HAS_PANDAS and trades:
+        has_date = 'date' in trades[0] or 'timestamp' in trades[0]
+        if has_date:
+            try:
+                date_col = 'date' if 'date' in trades[0] else 'timestamp'
+                trade_df = pd.DataFrame(trades)
+                trade_df[date_col] = pd.to_datetime(trade_df[date_col])
+                daily_pnl = trade_df.groupby(trade_df[date_col].dt.date)['pnl'].sum()
+                equity = initial_capital + daily_pnl.cumsum()  # pd.Series
+            except Exception:
+                equity = None  # fallback to sequential
+
+    if equity is None:
+        # No timestamps or pandas unavailable → treat each trade as a "day"
+        equity = np.cumsum([initial_capital] + pnls)
+
+    # ----- Daily returns -----
+    if isinstance(equity, pd.Series):
+        daily_returns = equity.pct_change().dropna().values  # numpy array
+    else:
+        # equity is a numpy array
+        daily_returns = np.diff(equity) / equity[:-1]
+
+    # ----- Sharpe ratio -----
+    if len(daily_returns) > 1 and np.std(daily_returns) > 0:
+        daily_sharpe = np.mean(daily_returns) / (np.std(daily_returns, ddof=1) + 1e-10)
+        sharpe = daily_sharpe * np.sqrt(periods_per_year) if annualize else daily_sharpe
+    else:
+        sharpe = 0.0
+
+    metrics['sharpe_ratio'] = sharpe
+    # Keep the old simple measure for reference
+    metrics['trade_signal_to_noise'] = (
+        np.mean(pnls) / (np.std(pnls) + 1e-8) if len(pnls) > 1 else 0.0
+    )
+
+    return metrics
 
 if __name__ == "__main__":
     print("=" * 60)

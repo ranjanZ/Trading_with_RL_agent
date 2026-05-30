@@ -4,10 +4,10 @@ __pycache__/
 .ipynb_checkpoints/ 
 # Ignore virtual environment directories
 .venv/
+.venv310/
 
 # Ignore log files
 *.log
 # Ignore temporary files
 *.tmp*.csv
-Data/
 Data/streaming/

@@ -5,12 +5,15 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 import logging
 from pathlib import Path
-
+import pandas as pd
 from models.policy_network import TradingPolicyNetwork
 from experts.trend_following import TrendFollowingExpert
-from utils.metrics import calculate_imitation_metrics
+from utils.metrics import calculate_trading_metrics
+
+
 
 logger = logging.getLogger(__name__)
+
 
 class ImitationDataset(Dataset):
     def __init__(self, observations: np.ndarray, actions: np.ndarray):
@@ -26,19 +29,28 @@ class ImitationDataset(Dataset):
 
 class ImitationLearner:
     """
-    Imitation learning from expert demonstrations.
-    Uses the TradingEnvironment to generate (state, expert_action) pairs.
+    Imitation learning from the Trend‑Following expert.
+
+    The expert produces signals in {‑1 (SELL), 0 (HOLD), +1 (BUY)}.
+    The environment’s action space is exactly these three values.
+    The policy network learns to output the same three signals (encoded
+    as class indices 0, 1, 2) via supervised cloning and optional DAgger.
     """
+
+    # Mapping from expert signal to class index for network training
+    SIGNAL_TO_CLASS = {-1: 0, 0: 1, 1: 2}
+    CLASS_TO_SIGNAL = {0: -1, 1: 0, 2: 1}
 
     def __init__(self, env, config: Dict):
         self.env = env
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Model architecture – input dimension from environment
+        # Environment observation dimension
         self.input_dim = env.observation_space.shape[0]
         self.hidden_dims = config.get('hidden_dims', [256, 128, 64])
-        self.output_dim = 4   # BUY, SELL, HOLD, CLOSE
+        # 3 output classes: SELL, HOLD, BUY
+        self.output_dim = 3
 
         # Training hyperparameters
         self.epochs = config.get('epochs', 50)
@@ -57,7 +69,7 @@ class ImitationLearner:
             slow_ma=config.get('slow_ma', 50)
         )
 
-        # Policy network
+        # Policy network – outputs 3 classes (expert signals)
         self.model = TradingPolicyNetwork(
             input_dim=self.input_dim,
             hidden_dims=self.hidden_dims,
@@ -65,62 +77,70 @@ class ImitationLearner:
             use_attention=config.get('use_attention', True)
         ).to(self.device)
 
+        self.load_model("models/model_weights/imitation_policy.pth")
+
+
+    # ------------------------------------------------------------------
+    #  Expert demonstration collection
+    # ------------------------------------------------------------------
     def collect_expert_demonstrations(self, num_episodes: int = 10) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Run the expert policy in the environment and record (observation, expert_action).
+        Run the expert policy in the environment and record
+        (observation, signal_class) pairs.
         """
         all_obs = []
-        all_actions = []
+        all_labels = []
 
         for ep in range(num_episodes):
             obs, _ = self.env.reset()
-            self.expert.reset_position()
             done = False
             step = 0
             while not done and step < self.dagger_steps_per_episode:
-                # Get expert action using the environment's current data and step index
-                expert_action = self.expert.get_expert_action(self.env.data, self.env.current_step)
-                all_obs.append(obs.copy())
-                all_actions.append(expert_action)
+                # 1. Expert raw signal (-1, 0, +1)
+                signal = self.expert.get_expert_action(self.env.data, self.env.current_step)
 
-                # Step environment using the expert's action
-                obs, reward, terminated, truncated, info = self.env.step(expert_action)
+                # 2. Record observation and the corresponding class label
+                label = self.SIGNAL_TO_CLASS[signal]
+                all_obs.append(obs.copy())
+                all_labels.append(label)
+
+                # 3. Step the environment directly with the expert's signal
+                obs, reward, terminated, truncated, info = self.env.step(signal)
                 done = terminated or truncated
                 step += 1
 
             logger.info(f"Episode {ep+1}: collected {step} transitions")
 
-        return np.array(all_obs), np.array(all_actions)
+        return np.array(all_obs), np.array(all_labels)
 
+    # ------------------------------------------------------------------
+    #  Behavioural cloning training
+    # ------------------------------------------------------------------
     def train(self, num_expert_episodes: int = 10) -> nn.Module:
         """
-        Collect expert demonstrations and train policy via behavioural cloning.
-        Optionally then run DAgger iterations.
+        Collect expert demonstrations and train the policy via behavioural cloning.
+        Optionally run DAgger iterations afterwards.
         """
-        # 1. Collect expert data
         logger.info("Collecting expert demonstrations...")
         X, y = self.collect_expert_demonstrations(num_expert_episodes)
 
-        # 2. Train/validation split
         split = int(len(X) * (1 - self.validation_split))
         X_train, X_val = X[:split], X[split:]
         y_train, y_val = y[:split], y[split:]
 
-        # 3. Behavioural cloning
         self.model = self._behavioral_cloning(X_train, y_train, X_val, y_val)
 
-        # 4. DAgger iterative improvement (if enabled)
         if self.use_dagger:
             self.model = self._dagger_training()
 
         return self.model
 
     def _behavioral_cloning(self, X_train, y_train, X_val, y_val):
-        """Standard supervised training."""
+        """Standard supervised training on signal classes."""
         train_dataset = ImitationDataset(X_train, y_train)
-        val_dataset = ImitationDataset(X_val, y_val)
-        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+        val_dataset   = ImitationDataset(X_val, y_val)
+        train_loader  = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        val_loader    = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
 
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
@@ -128,10 +148,8 @@ class ImitationLearner:
 
         best_val_acc = 0
         best_state = None
-        #print(DBG)
 
         for epoch in range(self.epochs):
-            # Training
             self.model.train()
             train_loss, train_correct, train_total = 0, 0, 0
             for batch_idx, (obs, act) in enumerate(train_loader):
@@ -146,10 +164,10 @@ class ImitationLearner:
                 pred = torch.argmax(logits, dim=1)
                 train_correct += (pred == act).sum().item()
                 train_total += act.size(0)
-                
-                if(batch_idx + 1) % 4 == 0:
-                    # Print loss for this batch
+
+                if (batch_idx + 1) % 10 == 0:
                     print(f"Epoch {epoch+1}, Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss.item():.4f}")
+
             # Validation
             self.model.eval()
             val_loss, val_correct, val_total = 0, 0, 0
@@ -164,17 +182,14 @@ class ImitationLearner:
                     val_total += act.size(0)
 
             train_acc = 100 * train_correct / train_total
-            val_acc = 100 * val_correct / val_total
+            val_acc   = 100 * val_correct / val_total
             scheduler.step(val_loss)
 
-            if (epoch + 1) % 1 == 0:
-                print(
-                    f"Epoch {epoch+1}/{self.epochs} | "
-                    f"Train Loss: {train_loss/len(train_loader):.4f} | "
-                    f"Train Acc: {train_acc:.2f}% | "
-                    f"Val Loss: {val_loss/len(val_loader):.4f} | "
-                    f"Val Acc: {val_acc:.2f}%"
-                )
+            print(f"Epoch {epoch+1}/{self.epochs} | "
+                  f"Train Loss: {train_loss/len(train_loader):.4f} | "
+                  f"Train Acc: {train_acc:.2f}% | "
+                  f"Val Loss: {val_loss/len(val_loader):.4f} | "
+                  f"Val Acc: {val_acc:.2f}%")
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
@@ -184,74 +199,81 @@ class ImitationLearner:
         print(f"Best validation accuracy: {best_val_acc:.2f}%")
         return self.model
 
+    # ------------------------------------------------------------------
+    #  DAgger implementation
+    # ------------------------------------------------------------------
     def _dagger_training(self) -> nn.Module:
-        """
-        DAgger: collect new trajectories using current policy,
-        query expert for correct actions, aggregate dataset, retrain.
-        """
+        """DAgger: iterative dataset aggregation and retraining."""
         aggregated_obs = []
-        aggregated_actions = []
+        aggregated_labels = []
 
-        # Initial dataset from expert demonstrations (can reuse previously collected)
+        # Start with fresh expert demonstrations
         X_init, y_init = self.collect_expert_demonstrations(num_episodes=5)
         aggregated_obs.extend(X_init)
-        aggregated_actions.extend(y_init)
+        aggregated_labels.extend(y_init)
 
         for it in range(self.dagger_iters):
             logger.info(f"DAgger iteration {it+1}/{self.dagger_iters}")
 
-            # Collect policy rollouts and expert actions simultaneously
-            new_obs, expert_actions, policy_actions = self._collect_policy_and_expert_actions()
+            new_obs, expert_labels, policy_labels = self._collect_policy_and_expert_actions()
 
-            # Add only where policy action differs from expert action
-            for obs, policy_act, expert_act in zip(new_obs, policy_actions, expert_actions):
-                if policy_act != expert_act:
+            # Add samples where policy disagreed with expert
+            for obs, pol_lbl, exp_lbl in zip(new_obs, policy_labels, expert_labels):
+                if pol_lbl != exp_lbl:
                     aggregated_obs.append(obs)
-                    aggregated_actions.append(expert_act)
+                    aggregated_labels.append(exp_lbl)
 
-            # Retrain on aggregated dataset
             X_agg = np.array(aggregated_obs)
-            y_agg = np.array(aggregated_actions)
+            y_agg = np.array(aggregated_labels)
             split = int(len(X_agg) * (1 - self.validation_split))
-            self._behavioral_cloning(X_agg[:split], y_agg[:split], X_agg[split:], y_agg[split:])
+            self._behavioral_cloning(X_agg[:split], y_agg[:split],
+                                     X_agg[split:], y_agg[split:])
 
         return self.model
 
     def _collect_policy_and_expert_actions(self) -> Tuple[List[np.ndarray], List[int], List[int]]:
         """
-        Run current policy in environment, while also running expert side‑by‑side.
-        Returns: observations, expert_actions, policy_actions.
+        Run current policy alongside expert.
+        Returns:
+            observations: list of observation arrays
+            expert_labels: class indices (0,1,2) from expert
+            policy_labels: class indices from current policy
         """
         observations = []
-        expert_actions = []
-        policy_actions = []
+        expert_labels = []
+        policy_labels = []
 
-        for _ in range(5):  # collect 5 episodes per iteration
+        for _ in range(5):
             obs, _ = self.env.reset()
-            self.expert.reset_position()
             done = False
             step = 0
             while not done and step < self.dagger_steps_per_episode:
-                # Policy action
+                # 1. Policy prediction (signal class)
                 obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
                 with torch.no_grad():
                     logits, _, _ = self.model(obs_tensor)
-                    policy_action = torch.argmax(logits, dim=1).item()
+                    pol_class = torch.argmax(logits, dim=1).item()
+                pol_signal = self.CLASS_TO_SIGNAL[pol_class]
 
-                # Expert action (using same environment state)
-                expert_action = self.expert.get_expert_action(self.env.data, self.env.current_step)
+                # 2. Expert signal and its class
+                exp_signal = self.expert.get_expert_action(self.env.data, self.env.current_step)
+                exp_class = self.SIGNAL_TO_CLASS[exp_signal]
 
+                # 3. Record observations and labels
                 observations.append(obs.copy())
-                expert_actions.append(expert_action)
-                policy_actions.append(policy_action)
+                expert_labels.append(exp_class)
+                policy_labels.append(pol_class)
 
-                # Step environment using the policy action (makes the next state)
-                obs, reward, terminated, truncated, info = self.env.step(policy_action)
+                # 4. Step environment using the POLICY action (as direct signal)
+                obs, reward, terminated, truncated, info = self.env.step(pol_signal)
                 done = terminated or truncated
                 step += 1
 
-        return observations, expert_actions, policy_actions
+        return observations, expert_labels, policy_labels
 
+    # ------------------------------------------------------------------
+    #  Model persistence
+    # ------------------------------------------------------------------
     def save_model(self, path: str):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save({
@@ -272,40 +294,48 @@ class ImitationLearner:
         """Evaluate the learned policy in the environment."""
         total_rewards = []
         total_pnls = []
+
+        trading_metrics=[]
         for ep in range(num_episodes):
             obs, _ = self.env.reset()
+            
             done = False
             episode_reward = 0
+            #print(DBG)
             while not done:
                 obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
                 with torch.no_grad():
                     logits, _, _ = self.model(obs_tensor)
-                    action = torch.argmax(logits, dim=1).item()
-                obs, reward, terminated, truncated, info = self.env.step(action)
+                    pol_class = torch.argmax(logits, dim=1).item()
+                signal = self.CLASS_TO_SIGNAL[pol_class]
+                obs, reward, terminated, truncated, info = self.env.step(signal)
                 episode_reward += reward
                 done = terminated or truncated
+                #print(f"Done: {done},ep:{ep} obs:{obs}, reward:{reward}")
+
             total_rewards.append(episode_reward)
             total_pnls.append(info['total_pnl'])
-        return {'avg_reward': np.mean(total_rewards), 'avg_pnl': np.mean(total_pnls)}
+            trading_metrics.append(calculate_trading_metrics(info['trade_history']))
+
+        df_trading_merics = pd.DataFrame(trading_metrics)
+
+        return df_trading_merics
 
 
 if __name__ == "__main__":
     from environments.trading_env import TradingEnvironment
     import yaml
 
-    # Load configurations
     with open("config/config.yaml", "r") as f:
         cfg = yaml.safe_load(f)
 
-    # Create environment (it loads its own data from data_config.yaml)
     env = TradingEnvironment()
 
-    # Imitation learning config
     imitation_cfg = {
         **cfg['imitation'],
         'fast_ma': 20,
         'slow_ma': 50,
-        'use_dagger': False,          # Set to True to enable DAgger
+        'use_dagger': False,          # Set to True for DAgger
         'dagger_iterations': 3,
         'dagger_rollout_steps': 500,
         'hidden_dims': [256, 128, 64],
@@ -313,13 +343,7 @@ if __name__ == "__main__":
     }
 
     learner = ImitationLearner(env, imitation_cfg)
-
-    # Train
     learner.train(num_expert_episodes=1)
-
-    # Save model
     learner.save_model("models/model_weights/imitation_policy.pth")
-
-    # Evaluate
-    eval_results = learner.evaluate_in_env(num_episodes=5)
-    print(f"Evaluation results: {eval_results}")
+    eval_results_df = learner.evaluate_in_env(num_episodes=1)
+    print(f"{eval_results_df}")

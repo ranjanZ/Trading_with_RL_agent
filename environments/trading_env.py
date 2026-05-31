@@ -8,6 +8,8 @@ from pathlib import Path
 import logging
 import yaml
 
+
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -33,7 +35,7 @@ class TradingEnvironment(gym.Env):
 
     def __init__(self,):
         super().__init__()
-
+    
         ############config loading ############
         # Load main config (trading parameters)
         with open("config/config.yaml", "r") as f:
@@ -125,6 +127,7 @@ class TradingEnvironment(gym.Env):
         self.current_step = self.lookback_window
         self.max_steps = len(self.data) - 1
 
+
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         super().reset(seed=seed)
 
@@ -141,6 +144,9 @@ class TradingEnvironment(gym.Env):
         info = self._get_info()
 
         return obs, info
+
+
+
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         # action is directly -1, 0, or 1
@@ -162,6 +168,7 @@ class TradingEnvironment(gym.Env):
             reward = -0.1  # penalty for invalid action
             obs = self._get_observation()
             info.update(self._get_info())
+            self.current_step += 1
             return obs, reward, False, False, info
 
         # ---- Execute action with state machine logic ----
@@ -200,7 +207,7 @@ class TradingEnvironment(gym.Env):
 
         obs = self._get_observation()
         info.update(self._get_info())
-
+        #print(f"Step {self.current_step}/{self.max_steps}: Action={info['action_name']}, Position={info['new_position']}")
         return obs, reward, terminated, False, info
 
     # ----- Helper methods (modified for state machine) -----
@@ -265,6 +272,7 @@ class TradingEnvironment(gym.Env):
         else:
             self.unrealized_pnl = (self.entry_price - price) * self.position_size
 
+
     def _get_observation(self) -> np.ndarray:
         if self.data is None or len(self.data) == 0:
             return np.zeros(self.observation_dim, dtype=np.float32)
@@ -273,13 +281,80 @@ class TradingEnvironment(gym.Env):
         end = self.current_step + 1
         window = self.data.iloc[start:end]
 
+        # Extract features as 2D array (time_steps x features)
+        feature_matrix = []
+        for col in self.feature_columns:
+            if col in window.columns:
+                feature_matrix.append(window[col].fillna(0).values)
+            else:
+                feature_matrix.append(np.zeros(len(window)))
+        
+        # Convert to numpy array (features x time)
+        feature_matrix = np.array(feature_matrix, dtype=np.float32)
+        
+        # ----- NORMALIZE EACH FEATURE COLUMN INDEPENDENTLY -----
+        # Normalize across time dimension for each feature
+        for i in range(feature_matrix.shape[0]):
+            mean = np.mean(feature_matrix[i])
+            std = np.std(feature_matrix[i])
+            if std > 1e-8:
+                feature_matrix[i] = (feature_matrix[i] - mean) / std
+            else:
+                feature_matrix[i] = feature_matrix[i] - mean
+        
+        # Clip extreme values
+        feature_matrix = np.clip(feature_matrix, -5.0, 5.0)
+        
+        # Flatten back to 1D
+        features = feature_matrix.flatten()
+        # ---------------------------------
+        
+        # Position one-hot
+        pos = self.current_position
+        pos_onehot = [1 if pos == 1 else 0, 1 if pos == -1 else 0, 1 if pos == 0 else 0]
+        features = np.concatenate([features, pos_onehot])
+        
+        # PnL info (also normalize)
+        pnl_features = np.array([self.unrealized_pnl, self.realized_pnl, 
+                                self.unrealized_pnl + self.realized_pnl], dtype=np.float32)
+        
+        # Normalize PnL features
+        pnl_mean = np.mean(pnl_features)
+        pnl_std = np.std(pnl_features)
+        if pnl_std > 1e-8:
+            pnl_features = (pnl_features - pnl_mean) / pnl_std
+        else:
+            pnl_features = pnl_features - pnl_mean
+        pnl_features = np.clip(pnl_features, -10.0, 10.0)
+        
+        features = np.concatenate([features, pnl_features])
+        
+        # Ensure fixed size
+        if len(features) < self.observation_dim:
+            features = np.pad(features, (0, self.observation_dim - len(features)))
+        elif len(features) > self.observation_dim:
+            features = features[:self.observation_dim]
+        
+        return features.astype(np.float32)
+
+
+    def _get_observation_old(self) -> np.ndarray:
+        
+        if self.data is None or len(self.data) == 0:
+            return np.zeros(self.observation_dim, dtype=np.float32)
+
+        start = max(0, self.current_step - self.lookback_window)
+        end = self.current_step + 1
+        window = self.data.iloc[start:end]
+        
         features = []
         for col in self.feature_columns:
             if col in window.columns:
                 features.extend(window[col].fillna(0).values)
             else:
                 features.extend([0] * len(window))
-
+    
+        
         # position one‑hot
         pos = self.current_position
         pos_onehot = [1 if pos == 1 else 0, 1 if pos == -1 else 0, 1 if pos == 0 else 0]

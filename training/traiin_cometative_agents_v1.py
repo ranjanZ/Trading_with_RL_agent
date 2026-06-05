@@ -240,7 +240,7 @@ def evaluate_and_plot(test_env: CompetitiveTradingEnv,
 
 if __name__ == "__main__":
     # ---- 1. Training ----
-    train_base = TradingEnvironment(start_date="2023-01-01", end_date="2026-06-30")
+    train_base = TradingEnvironment(start_date="2026-01-01", end_date="2026-02-01")
     train_env = CompetitiveTradingEnv(train_base,
                                       reward_mode='independent',   # <-- independent rewards
                                       include_opponent_position=True,
@@ -256,7 +256,7 @@ if __name__ == "__main__":
     print("Training complete.")
 
     # ---- 2. Evaluation ----
-    test_base = TradingEnvironment(start_date="2024-07-01", end_date="2026-12-31")
+    test_base = TradingEnvironment(start_date="2024-02-01", end_date="2026-03-01")
     test_env = CompetitiveTradingEnv(test_base,
                                      reward_mode='independent',   # evaluate own profit
                                      include_opponent_position=True,

@@ -33,7 +33,7 @@ class TradingEnvironment(gym.Env):
          1 -> BUY
     """
 
-    def __init__(self,):
+    def __init__(self, start_date: Optional[str] = None, end_date: Optional[str] = None):
         super().__init__()
     
         ############config loading ############
@@ -88,7 +88,16 @@ class TradingEnvironment(gym.Env):
                 self.data = pd.read_csv(data_path)
                 if 'time' in self.data.columns:
                     self.data['time'] = pd.to_datetime(self.data['time'])
+            # ADD THIS: Filter by date range
+            if start_date and end_date and 'time' in self.data.columns:
+                self.data = self.data[
+                    (self.data['time'] >= pd.to_datetime(start_date)) & 
+                    (self.data['time'] <= pd.to_datetime(end_date))
+                ].reset_index(drop=True)
+                print(f"Filtered to {len(self.data)} rows from {start_date} to {end_date}")
+            
             logger.info(f"Loaded data from {data_path}: {len(self.data)} rows")
+
         elif self.data is not None:
             logger.info(f"Using provided data: {len(self.data)} rows")
         else:
@@ -394,7 +403,8 @@ class TradingEnvironment(gym.Env):
 if __name__ == "__main__":
 
     print("Testing TradingEnvironment with random actions and state machine...")
-    env = TradingEnvironment()
+    env = TradingEnvironment(start_date="2024-01-01",end_date="2024-12-31")
+    
 
     # Run for more steps to ensure actual trades occur
     obs, info = env.reset()
